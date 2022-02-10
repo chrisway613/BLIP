@@ -5,6 +5,7 @@
  * For full license text, see LICENSE.txt file in the repo root or https://opensource.org/licenses/BSD-3-Clause
  * By Junnan Li
 '''
+
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -19,6 +20,7 @@ import torch.nn.functional as F
 import os
 from urllib.parse import urlparse
 from timm.models.hub import download_cached_file
+
 
 class BLIP_Base(nn.Module):
     def __init__(self,                 

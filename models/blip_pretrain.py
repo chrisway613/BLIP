@@ -5,94 +5,114 @@
  * For full license text, see LICENSE.txt file in the repo root or https://opensource.org/licenses/BSD-3-Clause
  * By Junnan Li
 '''
-from models.med import BertConfig, BertModel, BertLMHeadModel
-from transformers import BertTokenizer
+
 import transformers
 transformers.logging.set_verbosity_error()
 
 import torch
-from torch import nn
+import torch.nn as nn
 import torch.nn.functional as F
 
-from models.blip import create_vit, init_tokenizer, load_checkpoint
+from models.blip import create_vit, init_tokenizer
+from models.med import BertConfig, BertModel, BertLMHeadModel
+
 
 class BLIP_Pretrain(nn.Module):
     def __init__(self,                 
-                 med_config = 'configs/bert_config.json',  
-                 image_size = 224,
-                 vit = 'base',
-                 vit_grad_ckpt = False,
-                 vit_ckpt_layer = 0,                    
-                 embed_dim = 256,     
-                 queue_size = 57600,
-                 momentum = 0.995,
+                 med_config='configs/bert_config.json',  
+                 image_size=224,
+                 vit='base',
+                 vit_grad_ckpt=False,
+                 vit_ckpt_layer=0,                    
+                 embed_dim=256,     
+                 queue_size=57600,
+                 momentum=0.995,
                  ):
         """
         Args:
             med_config (str): path for the mixture of encoder-decoder model's configuration file
             image_size (int): input image size
             vit (str): model size of vision transformer
-        """               
+        """
+
         super().__init__()
         
-        self.visual_encoder, vision_width = create_vit(vit,image_size, vit_grad_ckpt, vit_ckpt_layer, 0)
-        
-        if vit=='base':
+        # Vision Encoder
+        self.visual_encoder, vision_width = create_vit(vit, image_size, vit_grad_ckpt, vit_ckpt_layer, 0)
+        if vit == 'base':
             checkpoint = torch.hub.load_state_dict_from_url(
                 url="https://dl.fbaipublicfiles.com/deit/deit_base_patch16_224-b5f2ef4d.pth",
-                map_location="cpu", check_hash=True)
+                map_location="cpu", check_hash=True
+            )
             state_dict = checkpoint["model"]     
-            msg = self.visual_encoder.load_state_dict(state_dict,strict=False)
-        elif vit=='large':
+            # msg = self.visual_encoder.load_state_dict(state_dict,strict=False)
+            self.visual_encoder.load_state_dict(state_dict, strict=False)
+        elif vit == 'large':
             from timm.models.helpers import load_custom_pretrained
             from timm.models.vision_transformer import default_cfgs
-            load_custom_pretrained(self.visual_encoder,default_cfgs['vit_large_patch16_224_in21k'])        
-               
-        self.tokenizer = init_tokenizer()   
+
+            # 将权重 load 到 visual_encoder 中
+            load_custom_pretrained(self.visual_encoder, default_cfgs['vit_large_patch16_224_in21k'])
+        else:
+            raise NotImplementedError(f"Only support vit-base or vit-large, current: vit-{vit}")
+
+        # Text Encoder
+        self.tokenizer = init_tokenizer()
         encoder_config = BertConfig.from_json_file(med_config)
         encoder_config.encoder_width = vision_width
-        self.text_encoder = BertModel.from_pretrained('bert-base-uncased',config=encoder_config, add_pooling_layer=False)
+        self.text_encoder = BertModel.from_pretrained(
+            'bert-base-uncased',
+            config=encoder_config,
+            add_pooling_layer=False
+        )
         self.text_encoder.resize_token_embeddings(len(self.tokenizer)) 
-
         text_width = self.text_encoder.config.hidden_size
         
+        # FFN
         self.vision_proj = nn.Linear(vision_width, embed_dim)
         self.text_proj = nn.Linear(text_width, embed_dim)
 
+        # Head(for Image-Text matching)
         self.itm_head = nn.Linear(text_width, 2) 
         
-        # create momentum encoders  
-        self.visual_encoder_m, vision_width = create_vit(vit,image_size)              
+        # Momentum Encoders & FFN
+        self.visual_encoder_m, vision_width = create_vit(vit, image_size)              
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
-        self.text_encoder_m = BertModel(config=encoder_config, add_pooling_layer=False)      
+        self.text_encoder_m = BertModel(config=encoder_config, add_pooling_layer=False)
         self.text_proj_m = nn.Linear(text_width, embed_dim)
         
-        self.model_pairs = [[self.visual_encoder,self.visual_encoder_m],
-                            [self.vision_proj,self.vision_proj_m],
-                            [self.text_encoder,self.text_encoder_m],
-                            [self.text_proj,self.text_proj_m],
-                           ]       
+        self.model_pairs = [
+            [self.visual_encoder, self.visual_encoder_m],
+            [self.vision_proj, self.vision_proj_m],
+            [self.text_encoder, self.text_encoder_m],
+            [self.text_proj, self.text_proj_m],
+        ]
+
+        # TODO: what the hell is this?
         self.copy_params()
 
-        # create the queue
+        # TODO: what do they do?
+        # Queue
         self.register_buffer("image_queue", torch.randn(embed_dim, queue_size))
         self.register_buffer("text_queue", torch.randn(embed_dim, queue_size))
         self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))  
 
-        self.image_queue = nn.functional.normalize(self.image_queue, dim=0)
-        self.text_queue = nn.functional.normalize(self.text_queue, dim=0)
+        self.image_queue = F.normalize(self.image_queue, dim=0)
+        self.text_queue = F.normalize(self.text_queue, dim=0)
         
-        self.queue_size = queue_size
         self.momentum = momentum
-        self.temp = nn.Parameter(0.07*torch.ones([]))   
+        self.queue_size = queue_size
+        # TODO: what the hell is this?
+        self.temp = nn.Parameter(0.07 * torch.ones([]))   
         
-        # create the decoder
+        # Decoder
         decoder_config = BertConfig.from_json_file(med_config)
         decoder_config.encoder_width = vision_width        
-        self.text_decoder = BertLMHeadModel.from_pretrained('bert-base-uncased',config=decoder_config)    
-        self.text_decoder.resize_token_embeddings(len(self.tokenizer)) 
-        tie_encoder_decoder_weights(self.text_decoder.bert,self.text_encoder,'','/attention')
-        
+        self.text_decoder = BertLMHeadModel.from_pretrained('bert-base-uncased', config=decoder_config)    
+        self.text_decoder.resize_token_embeddings(len(self.tokenizer))
+        # TODO: take a closer look~
+        # 除了 attention 层，其余部分 encoder 与 decoder 共享权重
+        tie_encoder_decoder_weights(self.text_decoder.bert, self.text_encoder, '' , '/attention')
         
     def forward(self, image, caption, alpha):
         with torch.no_grad():
