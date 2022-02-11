@@ -6,20 +6,20 @@
  * By Junnan Li
 '''
 
+import os
 import warnings
+
 warnings.filterwarnings("ignore")
 
-from models.vit import VisionTransformer, interpolate_pos_embed
-from models.med import BertConfig, BertModel, BertLMHeadModel
-from transformers import BertTokenizer
-
 import torch
-from torch import nn
-import torch.nn.functional as F
+import torch.nn as nn
 
-import os
 from urllib.parse import urlparse
+from transformers import BertTokenizer
 from timm.models.hub import download_cached_file
+
+from models.med import BertConfig, BertModel, BertLMHeadModel
+from models.vit import VisionTransformer, interpolate_pos_embed
 
 
 class BLIP_Base(nn.Module):
@@ -187,27 +187,31 @@ def blip_feature_extractor(pretrained='',**kwargs):
 
 def init_tokenizer():
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
-    tokenizer.add_special_tokens({'bos_token':'[DEC]'})
-    tokenizer.add_special_tokens({'additional_special_tokens':['[ENC]']})       
-    tokenizer.enc_token_id = tokenizer.additional_special_tokens_ids[0]  
+    tokenizer.add_special_tokens({'bos_token': '[DEC]'})
+    tokenizer.add_special_tokens({'additional_special_tokens': ['[ENC]']})
+    tokenizer.enc_token_id = tokenizer.additional_special_tokens_ids[0]
+
     return tokenizer
 
 
 def create_vit(vit, image_size, use_grad_checkpointing=False, ckpt_layer=0, drop_path_rate=0):
-        
-    assert vit in ['base', 'large'], "vit parameter must be base or large"
-    if vit=='base':
+    assert vit in ['base', 'large'], f"vit parameter must be base or large, but got: {vit}"
+
+    if vit == 'base':
         vision_width = 768
-        visual_encoder = VisionTransformer(img_size=image_size, patch_size=16, embed_dim=vision_width, depth=12, 
-                                           num_heads=12, use_grad_checkpointing=use_grad_checkpointing, ckpt_layer=ckpt_layer,
-                                           drop_path_rate=0 or drop_path_rate
-                                          )   
-    elif vit=='large':
+        visual_encoder = VisionTransformer(
+            img_size=image_size, patch_size=16, embed_dim=vision_width, depth=12,
+            num_heads=12, use_grad_checkpointing=use_grad_checkpointing, ckpt_layer=ckpt_layer,
+            drop_path_rate=0 or drop_path_rate
+        )
+    elif vit == 'large':
         vision_width = 1024
-        visual_encoder = VisionTransformer(img_size=image_size, patch_size=16, embed_dim=vision_width, depth=24, 
-                                           num_heads=16, use_grad_checkpointing=use_grad_checkpointing, ckpt_layer=ckpt_layer,
-                                           drop_path_rate=0.1 or drop_path_rate
-                                          )   
+        visual_encoder = VisionTransformer(
+            img_size=image_size, patch_size=16, embed_dim=vision_width, depth=24,
+            num_heads=16, use_grad_checkpointing=use_grad_checkpointing, ckpt_layer=ckpt_layer,
+            drop_path_rate=0.1 or drop_path_rate
+        )
+
     return visual_encoder, vision_width
 
 def is_url(url_or_filename):

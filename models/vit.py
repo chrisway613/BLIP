@@ -10,19 +10,21 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+
 from functools import partial
 
-from timm.models.vision_transformer import _cfg, PatchEmbed
-from timm.models.registry import register_model
+from timm.models.vision_transformer import PatchEmbed
 from timm.models.layers import trunc_normal_, DropPath
-from timm.models.helpers import named_apply, adapt_input_conv
+from timm.models.helpers import adapt_input_conv
 
 from fairscale.nn.checkpoint.checkpoint_activations import checkpoint_wrapper
 
+
 class Mlp(nn.Module):
-    """ MLP as used in Vision Transformer, MLP-Mixer and related networks
     """
+    MLP as used in Vision Transformer, MLP-Mixer and related networks
+    """
+
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
@@ -38,12 +40,14 @@ class Mlp(nn.Module):
         x = self.drop(x)
         x = self.fc2(x)
         x = self.drop(x)
+
         return x
 
 
 class Attention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
+
         self.num_heads = num_heads
         head_dim = dim // num_heads
         # NOTE scale factor was wrong in my original version, can set manually to be compat with prev weights
@@ -83,11 +87,11 @@ class Attention(nn.Module):
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
+
         return x
 
 
 class Block(nn.Module):
-
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
                  drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_grad_checkpointing=False):
         super().__init__()
@@ -107,6 +111,7 @@ class Block(nn.Module):
     def forward(self, x, register_hook=False):
         x = x + self.drop_path(self.attn(self.norm1(x), register_hook=register_hook))
         x = x + self.drop_path(self.mlp(self.norm2(x)))
+
         return x
 
     
@@ -115,6 +120,7 @@ class VisionTransformer(nn.Module):
     A PyTorch impl of : `An Image is Worth 16x16 Words: Transformers for Image Recognition at Scale`  -
         https://arxiv.org/abs/2010.11929
     """
+
     def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=1000, embed_dim=768, depth=12,
                  num_heads=12, mlp_ratio=4., qkv_bias=True, qk_scale=None, representation_size=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0., norm_layer=None, 
@@ -137,7 +143,9 @@ class VisionTransformer(nn.Module):
             drop_path_rate (float): stochastic depth rate
             norm_layer: (nn.Module): normalization layer
         """
+
         super().__init__()
+        
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         norm_layer = norm_layer or partial(nn.LayerNorm, eps=1e-6)
 

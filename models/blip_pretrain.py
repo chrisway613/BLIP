@@ -7,6 +7,7 @@
 '''
 
 import transformers
+
 transformers.logging.set_verbosity_error()
 
 import torch
@@ -40,7 +41,7 @@ class BLIP_Pretrain(nn.Module):
 
         super().__init__()
         
-        # Vision Encoder
+        # Vision Encoder: pre-trained ViT
         self.visual_encoder, vision_width = create_vit(
             vit, image_size, 
             use_grad_checkpointing=vit_grad_ckpt,
@@ -64,7 +65,8 @@ class BLIP_Pretrain(nn.Module):
         else:
             raise NotImplementedError(f"Only support vit-base or vit-large, current: vit-{vit}")
 
-        # Text Encoder
+        # Text Encoder: pre-trained BERT's encoder
+        # 初始化 tokenizer 主要是在 BERT 的 tokenizer 基础上增加了 encode token 和 decode token
         self.tokenizer = init_tokenizer()
         encoder_config = BertConfig.from_json_file(med_config)
         encoder_config.encoder_width = vision_width
@@ -84,6 +86,7 @@ class BLIP_Pretrain(nn.Module):
         self.itm_head = nn.Linear(text_width, 2) 
         
         # Momentum Encoders & FFN
+        # 这部分用来生成 emebdding 相似矩阵的标签
         self.visual_encoder_m, vision_width = create_vit(vit, image_size)              
         self.vision_proj_m = nn.Linear(vision_width, embed_dim)
         self.text_encoder_m = BertModel(config=encoder_config, add_pooling_layer=False)
@@ -99,9 +102,11 @@ class BLIP_Pretrain(nn.Module):
         self.copy_params()
 
         # Queue
+        # 存储图像和文本动量特征的队列，将用于生成 emebdding 相似度矩阵标签
         self.register_buffer("image_queue", torch.randn(embed_dim, queue_size))
         self.register_buffer("text_queue", torch.randn(embed_dim, queue_size))
-        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))  
+        # 队列指针，记录每次入队后的位置，从而可以指出下一次入队的位置。
+        self.register_buffer("queue_ptr", torch.zeros(1, dtype=torch.long))
 
         self.image_queue = F.normalize(self.image_queue, dim=0)
         self.text_queue = F.normalize(self.text_queue, dim=0)
@@ -112,9 +117,9 @@ class BLIP_Pretrain(nn.Module):
         # Scalar tensor: 0.07
         self.temp = nn.Parameter(0.07 * torch.ones([]))   
         
-        # Decoder
+        # Decoder: pre-trained BERT LM model
         decoder_config = BertConfig.from_json_file(med_config)
-        decoder_config.encoder_width = vision_width        
+        decoder_config.encoder_width = vision_width
         self.text_decoder = BertLMHeadModel.from_pretrained('bert-base-uncased', config=decoder_config)    
         self.text_decoder.resize_token_embeddings(len(self.tokenizer))
 
@@ -147,7 +152,9 @@ class BLIP_Pretrain(nn.Module):
 
         # Get momentum features
         with torch.no_grad():
-            # TODO: take a closer look~
+            # 动量更新，实质就是加权融合
+            # 因为 *_encoder_m, *_proj_m 是不接收梯度的
+            # 所以每次训练更新了 *_encoder, *_proj 之后就采用动量的方式更新 *_encoder_m, *_proj_m
             self._momentum_update()
 
             # Image momentum features
@@ -192,7 +199,8 @@ class BLIP_Pretrain(nn.Module):
         loss_t2i = -torch.sum(F.log_softmax(sim_t2i, dim=1) * sim_t2i_targets, dim=1).mean() 
         loss_ita = (loss_i2t + loss_t2i) / 2
 
-        # TODO: take a closer look~
+        # 将图像与文本的动量特征入队，若队列满，则从队头开始出队对应数量的特征。
+        # 注意，这里入队是将所有卡的结果都入队，而非仅仅当前本卡的结果。
         self._dequeue_and_enqueue(image_feat_m, text_feat_m)        
 
         ###============== Image-text Matching ===================###
@@ -253,6 +261,7 @@ class BLIP_Pretrain(nn.Module):
         # (2B,n_patches)
         image_atts_all = torch.cat([image_atts, image_atts])
 
+        # 由以上可知，负样本对数量是正样本对的2倍
         # Forward the negative image-text pair
         output_neg = self.text_encoder(
             text_ids_all,
@@ -279,19 +288,24 @@ class BLIP_Pretrain(nn.Module):
         
         ##================= LM ========================##
 
-        decoder_input_ids = text.input_ids.clone()      
-        decoder_input_ids[:,0] = self.tokenizer.bos_token_id
+        # Note: must be clone here in case of altering the original
+        decoder_input_ids = text.input_ids.clone()
+        # Replace cls tokens by decode tokens
+        decoder_input_ids[:, 0] = self.tokenizer.bos_token_id
+        # 由于是自回归的方式预测基于前面的 tokens 预测后面的 tokens, 因此解码目标就是输入文本本身，
+        # 只需要将 pad 部分的 token 置为 -100 额外标记出来即可。
         decoder_targets = decoder_input_ids.masked_fill(decoder_input_ids == self.tokenizer.pad_token_id, -100) 
 
-        decoder_output = self.text_decoder(decoder_input_ids, 
-                                           attention_mask = text.attention_mask, 
-                                           encoder_hidden_states = image_embeds,
-                                           encoder_attention_mask = image_atts,                  
-                                           labels = decoder_targets,
-                                           return_dict = True,   
-                                          )   
+        decoder_output = self.text_decoder(
+            decoder_input_ids,
+            attention_mask=text.attention_mask,
+            encoder_hidden_states=image_embeds,
+            encoder_attention_mask=image_atts,
+            labels=decoder_targets,
+            return_dict=True
+        )
 
-        loss_lm = decoder_output.loss                
+        loss_lm = decoder_output.loss
         return loss_ita, loss_itm, loss_lm
  
     @torch.no_grad()    
@@ -309,20 +323,21 @@ class BLIP_Pretrain(nn.Module):
       
     @torch.no_grad()
     def _dequeue_and_enqueue(self, image_feat, text_feat):
-        # gather keys before updating queue
+        # Gather keys before updating queue
         image_feats = concat_all_gather(image_feat)
         text_feats = concat_all_gather(text_feat)
 
         batch_size = image_feats.shape[0]
 
+        # queue_ptr 在模型初始化时 regist 到了 buffer 中，是个 size 为 1 的 tensor
         ptr = int(self.queue_ptr)
         assert self.queue_size % batch_size == 0  # for simplicity
 
         # replace the keys at ptr (dequeue and enqueue)
         self.image_queue[:, ptr:ptr + batch_size] = image_feats.T
         self.text_queue[:, ptr:ptr + batch_size] = text_feats.T
-        ptr = (ptr + batch_size) % self.queue_size  # move pointer
 
+        ptr = (ptr + batch_size) % self.queue_size  # move pointer
         self.queue_ptr[0] = ptr 
 
 
@@ -339,7 +354,7 @@ def concat_all_gather(tensor):
 
     tensors_gather = [torch.ones_like(tensor) for _ in range(dist.get_world_size())]
     dist.all_gather(tensors_gather, tensor, async_op=False)
-    output = torch.cat(tensors_gather, dim=0)
+    output = torch.cat(tensors_gather)
 
     return output
 

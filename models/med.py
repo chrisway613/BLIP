@@ -9,32 +9,19 @@
 '''
 
 import math
-import os
-import warnings
-from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import torch
-from torch import Tensor, device, dtype, nn
+from torch import Tensor, device, nn
 import torch.utils.checkpoint
 from torch import nn
 from torch.nn import CrossEntropyLoss
-import torch.nn.functional as F
 
 from transformers.activations import ACT2FN
-from transformers.file_utils import (
-    ModelOutput,
-)
 from transformers.modeling_outputs import (
     BaseModelOutputWithPastAndCrossAttentions,
     BaseModelOutputWithPoolingAndCrossAttentions,
-    CausalLMOutputWithCrossAttentions,
-    MaskedLMOutput,
-    MultipleChoiceModelOutput,
-    NextSentencePredictorOutput,
-    QuestionAnsweringModelOutput,
-    SequenceClassifierOutput,
-    TokenClassifierOutput,
+    CausalLMOutputWithCrossAttentions
 )
 from transformers.modeling_utils import (
     PreTrainedModel,
@@ -547,8 +534,8 @@ class BertOnlyMLMHead(nn.Module):
 
 class BertPreTrainedModel(PreTrainedModel):
     """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
-    models.
+    An abstract class to handle weights initialization and a simple interface for downloading 
+    and loading pretrained models.
     """
 
     config_class = BertConfig
@@ -809,7 +796,6 @@ class BertModel(BertPreTrainedModel):
 
 
 class BertLMHeadModel(BertPreTrainedModel):
-
     _keys_to_ignore_on_load_unexpected = [r"pooler"]
     _keys_to_ignore_on_load_missing = [r"position_ids", r"predictions.decoder.bias"]
 
