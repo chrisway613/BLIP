@@ -551,6 +551,7 @@ class BertPreTrainedModel(PreTrainedModel):
         elif isinstance(module, nn.LayerNorm):
             module.bias.data.zero_()
             module.weight.data.fill_(1.0)
+
         if isinstance(module, nn.Linear) and module.bias is not None:
             module.bias.data.zero_()
 
@@ -567,16 +568,13 @@ class BertModel(BertPreTrainedModel):
 
     def __init__(self, config, add_pooling_layer=True):
         super().__init__(config)
+
         self.config = config
-
         self.embeddings = BertEmbeddings(config)
-        
         self.encoder = BertEncoder(config)
-
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
         self.init_weights()
- 
 
     def get_input_embeddings(self):
         return self.embeddings.word_embeddings
@@ -591,7 +589,6 @@ class BertModel(BertPreTrainedModel):
         """
         for layer, heads in heads_to_prune.items():
             self.encoder.layer[layer].attention.prune_heads(heads)
-
     
     def get_extended_attention_mask(self, attention_mask: Tensor, input_shape: Tuple[int], device: device, is_decoder: bool) -> Tensor:
         """
@@ -608,9 +605,11 @@ class BertModel(BertPreTrainedModel):
         Returns:
             :obj:`torch.Tensor` The extended attention mask, with a the same dtype as :obj:`attention_mask.dtype`.
         """
+
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         if attention_mask.dim() == 3:
+            # 新增的这个维度对应 num_heads
             extended_attention_mask = attention_mask[:, None, :, :]
         elif attention_mask.dim() == 2:
             # Provided a padding mask of dimensions [batch_size, seq_length]
@@ -620,29 +619,30 @@ class BertModel(BertPreTrainedModel):
                 batch_size, seq_length = input_shape
 
                 seq_ids = torch.arange(seq_length, device=device)
+                # 因果注意力 mask 使得前面的 tokens 不能够感知到后面的 tokens
+                # (B,seq_length,seq_length)
                 causal_mask = seq_ids[None, None, :].repeat(batch_size, seq_length, 1) <= seq_ids[None, :, None]
-                # in case past_key_values are used we need to add a prefix ones mask to the causal mask
-                # causal and attention masks must have same type with pytorch version < 1.3
+                # In case past_key_values are used we need to add a prefix ones mask to the causal mask
+                # Causal and attention masks must have same type with pytorch version < 1.3
                 causal_mask = causal_mask.to(attention_mask.dtype)
-   
                 if causal_mask.shape[1] < attention_mask.shape[1]:
                     prefix_seq_len = attention_mask.shape[1] - causal_mask.shape[1]
+                    # (B,seq_length,prefix_seq_len+seq_length)
                     causal_mask = torch.cat(
                         [
                             torch.ones((batch_size, seq_length, prefix_seq_len), device=device, dtype=causal_mask.dtype),
-                            causal_mask,
+                            causal_mask
                         ],
                         axis=-1,
                     )                     
-
+                # (B,num_heads,seq_length,[prefix_seq_len+]seq_length)
                 extended_attention_mask = causal_mask[:, None, :, :] * attention_mask[:, None, None, :]
             else:
+                # 分别新增对应 num_heads, seq_length 的维度
                 extended_attention_mask = attention_mask[:, None, None, :]
         else:
             raise ValueError(
-                "Wrong shape for input_ids (shape {}) or attention_mask (shape {})".format(
-                    input_shape, attention_mask.shape
-                )
+                f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
             )
 
         # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
@@ -650,8 +650,10 @@ class BertModel(BertPreTrainedModel):
         # positions we want to attend and -10000.0 for masked positions.
         # Since we are adding it to the raw scores before the softmax, this is
         # effectively the same as removing these entirely.
+        # 最终设置为：计算 attention 时，值为 0 的位置将被纳入计算，而值为 -10000 的将会被忽略。
         extended_attention_mask = extended_attention_mask.to(dtype=self.dtype)  # fp16 compatibility
         extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
+
         return extended_attention_mask
     
     def forward(
@@ -690,10 +692,10 @@ class BertModel(BertPreTrainedModel):
             If set to :obj:`True`, :obj:`past_key_values` key value states are returned and can be used to speed up
             decoding (see :obj:`past_key_values`).
         """
+        
+        # 以下三个都是布尔值
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
-        output_hidden_states = (
-            output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
-        )
+        output_hidden_states = output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if is_decoder:
@@ -722,12 +724,14 @@ class BertModel(BertPreTrainedModel):
         past_key_values_length = past_key_values[0][0].shape[2] if past_key_values is not None else 0
 
         if attention_mask is None:
-            attention_mask = torch.ones(((batch_size, seq_length + past_key_values_length)), device=device)
-            
+            attention_mask = torch.ones((batch_size, seq_length + past_key_values_length), device=device)
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
-        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape, 
-                                                                                 device, is_decoder)
+        # 对 mask 的维度进行扩展，使得与 attention 一致，从而形成 element-wise 的对应效果。
+        # (B,num_heads,seq_length,[prefix_seq_len+]seq_length)
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(
+            attention_mask, input_shape, device, is_decoder
+        )
 
         # If a 2D or 3D attention mask is provided for the cross-attention
         # we need to make broadcastable to [batch_size, num_heads, seq_length, seq_length]
@@ -738,6 +742,7 @@ class BertModel(BertPreTrainedModel):
                 encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states.size()
             encoder_hidden_shape = (encoder_batch_size, encoder_sequence_length)
             
+            # 注意：对于 encoder attention mask 进行了取反操作，从而值为 1 的位置反而在计算 attention 时会被忽略。
             if type(encoder_attention_mask) == list:
                 encoder_extended_attention_mask = [self.invert_attention_mask(mask) for mask in encoder_attention_mask]
             elif encoder_attention_mask is None:
@@ -750,21 +755,28 @@ class BertModel(BertPreTrainedModel):
 
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
-        # attention_probs has shape bsz x n_heads x N x N
+        # attention_probs has shape bs x n_heads x N x N
         # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
+        # head mask 指示我们在计算注意力时是否要忽略某个注意力头，值为 0 代表忽略。
+        # 对 head mask 的维度进行扩展，使得其可以与 attention 形成 element-wise 的对应效果。
+        # (num_hidden_layers,B,num_heads,seq_length,seq_length) or [None] * num_hidden_layers
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
         
+        # ================= 对输入序列做 embedding 操作 ======================
+
         if encoder_embeds is None:
             embedding_output = self.embeddings(
                 input_ids=input_ids,
                 position_ids=position_ids,
                 inputs_embeds=inputs_embeds,
-                past_key_values_length=past_key_values_length,
+                past_key_values_length=past_key_values_length
             )
         else:
             embedding_output = encoder_embeds
-            
+        
+        # ======================== 对 embedding 编码 =======================
+
         encoder_outputs = self.encoder(
             embedding_output,
             attention_mask=extended_attention_mask,
@@ -776,7 +788,7 @@ class BertModel(BertPreTrainedModel):
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            mode=mode,
+            mode=mode
         )
         sequence_output = encoder_outputs[0]
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
@@ -784,15 +796,15 @@ class BertModel(BertPreTrainedModel):
         if not return_dict:
             return (sequence_output, pooled_output) + encoder_outputs[1:]
 
+        # TODO: take a closer look
         return BaseModelOutputWithPoolingAndCrossAttentions(
             last_hidden_state=sequence_output,
             pooler_output=pooled_output,
             past_key_values=encoder_outputs.past_key_values,
             hidden_states=encoder_outputs.hidden_states,
             attentions=encoder_outputs.attentions,
-            cross_attentions=encoder_outputs.cross_attentions,
+            cross_attentions=encoder_outputs.cross_attentions
         )
-
 
 
 class BertLMHeadModel(BertPreTrainedModel):
